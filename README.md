@@ -2,12 +2,12 @@
 <h1 align="center">3EED: Ground Everything Everywhere in 3D</h1>
 
 <p align="center">
-  <strong>Rong Li</strong><sup>1</sup>,
-  <strong>Yuhao Dong</strong><sup>2</sup>,
-  <strong>Tianshuai Hu</strong><sup>3</sup>,
-  <strong>Ao Liang</strong><sup>4</sup>,
-  <strong>Youquan Liu</strong><sup>5</sup>,
-  <strong>Dongyue Lu</strong><sup>4</sup>
+  <strong>Rong Li</strong><sup>1,*</sup>,
+  <strong>Yuhao Dong</strong><sup>2,*</sup>,
+  <strong>Tianshuai Hu</strong><sup>3,*</sup>,
+  <strong>Ao Liang</strong><sup>4,*</sup>,
+  <strong>Youquan Liu</strong><sup>5,*</sup>,
+  <strong>Dongyue Lu</strong><sup>4,*</sup>
 </p>
 <p align="center">
   <strong>Liang Pan</strong><sup>6</sup>,
