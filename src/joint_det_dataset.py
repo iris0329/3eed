@@ -22,14 +22,80 @@ import open3d as o3d
 from tqdm import tqdm
 
 from utils.align_3eed import convert_boxes_from_n_to_vir, convert_points_to_virtual
-from utils.visual import create_axis_aligned_bbox_with_cylindrical_edges, save_as_ply
+from utils.visual import create_rotated_bbox_with_cylindrical_edges, save_as_ply  # create_axis_aligned_bbox_with_cylindrical_edges
 from utils.transform_waymo import transform_to_front_view
 from utils.pcds_in_bbox import get_points_in_bbox
 from ops.teed_pointnet.roiaware_pool3d.roiaware_pool3d_utils import points_in_boxes_cpu
 
 import pickle
+
 # ==================== Constants ====================
 MAX_NUM_OBJ = 132
+
+# Class mappings
+CLASS_MAPPINGS = {
+    "car": 0,
+    "pedestrian": 1,
+    "bus": 2,
+    "othervehicle": 3,
+    "truck": 4,
+    "cyclist": 5,
+}
+
+# Waymo dataset synonyms
+WAYMO_SYNONYMS = {
+    "car": ["car", "vehicle", "sedan", "van", "coupe", "automobile", "convertible", "hatchback", "SUV"],
+    "truck": ["truck", "lorry", "freight", "pickup truck", "delivery truck", "cargo truck", "semi-truck"],
+    "bus": ["bus", "coach", "minibus", "shuttle", "school bus", "public transport"],
+    "othervehicle": ["vehicle", "van", "pickup", "minivan", "jeep", "SUV", "tractor", "trailer"],
+    "pedestrian": ["pedestrian", "person", "man", "woman", "people", "child", "boy", "girl", "adult", "passerby", "walker"],
+    "cyclist": ["cyclist", "biker", "bike rider", "rider"],
+}
+
+# M3ED dataset synonyms
+M3ED_SYNONYMS = {
+    "car": [
+        "car",
+        "vehicle",
+        "sedan",
+        "van",
+        "coupe",
+        "automobile",
+        "convertible",
+        "hatchback",
+        "SUV",
+        "truck",
+        "bus",
+        "coach",
+        "minibus",
+        "shuttle",
+        "school bus",
+        "public transport",
+        "lorry",
+        "freight",
+        "pickup truck",
+        "delivery truck",
+        "cargo truck",
+        "semi-truck",
+        "vehicle",
+        "van",
+        "pickup",
+        "minivan",
+        "jeep",
+        "SUV",
+        "tractor",
+        "trailer",
+    ],
+    "pedestrian": ["pedestrian", "person", "man", "woman", "people", "child", "boy", "girl", "adult", "passerby", "walker", "cyclist", "biker", "bike rider", "rider"],
+}
+
+# Dataset paths
+DATASET_PATHS = {
+    "waymo": "waymo",
+    "m3ed-drone": "M3ED-Drone",
+    "m3ed-quad": "M3ED-Quadruped",
+}
+
 
 # ==================== Dataset Class ====================
 class Joint3DDataset(Dataset):
@@ -66,6 +132,11 @@ class Joint3DDataset(Dataset):
         self.use_multiview = use_multiview
         self.data_path = data_path
         self.visualize = False
+        # self.visualize = True
+        if self.visualize:
+            self.vis_save_dir = "./visualization/wo_cpa"
+            os.makedirs(self.vis_save_dir, exist_ok=True)
+
         self.butd = butd
         self.butd_gt = butd_gt
         self.butd_cls = butd_cls
@@ -75,7 +146,7 @@ class Joint3DDataset(Dataset):
         # Initialize tokenizer and other utilities
         self.mean_rgb = np.array([109.8, 97.2, 83.8]) / 256
         self.tokenizer = RobertaTokenizerFast.from_pretrained("./data/roberta_base/")
-        
+
         # Load classification results if available
         if os.path.exists("data/cls_results.json"):
             with open("data/cls_results.json") as fid:
@@ -83,7 +154,7 @@ class Joint3DDataset(Dataset):
 
         # Load annotations
         self.annos = []
-        
+
         if self.split == "train":
             for dset in dataset_dict.keys():
                 _annos = self.load_annos(dset)
@@ -92,7 +163,47 @@ class Joint3DDataset(Dataset):
             for dset in test_dataset.keys():
                 _annos = self.load_annos(dset)
                 self.annos += _annos
-                
+
+    def _format_caption(self, utterance):
+        """Format caption by adding spaces and handling commas."""
+        return " " + " ".join(utterance.replace(",", " ,").split()) + " "
+
+    def _get_dataset_path(self, dataset):
+        """Get dataset path based on dataset type."""
+        if dataset not in DATASET_PATHS:
+            raise NotImplementedError(f"Dataset {dataset} not implemented")
+        return os.path.join(self.data_path, "3eed", DATASET_PATHS[dataset])
+
+    def _get_frame_paths(self, frame_path, dataset):
+        """Get all relevant file paths for a frame."""
+        return {
+            "image": os.path.join(frame_path, "image.jpg"),
+            "lidar": os.path.join(frame_path, "lidar.npy" if dataset == "waymo" else "lidar.bin"),
+            "meta": os.path.join(frame_path, "meta_info.json"),
+        }
+
+    def _log_error(self, message, class_names=None, dataset=None):
+        """Log error messages to appropriate files."""
+        if class_names is not None:
+            with open("log.txt", "a") as f:
+                f.write(f"match failed: {message}\n")
+                f.write(f"class name: {class_names}\n\n")
+        if dataset is not None:
+            with open(f"error_frames_{dataset}.txt", "a") as f:
+                f.write(f"{message}\n\n")
+
+    def _process_utterance(self, utterance, dataset):
+        """Process utterance based on dataset type."""
+        if dataset == "waymo":
+            return utterance
+        elif dataset in ["m3ed-drone", "m3ed-quad"]:
+            return utterance.split("Summary:")[-1].strip()
+        return utterance
+
+    def _get_synonyms_dict(self, dataset):
+        """Get appropriate synonyms dictionary based on dataset."""
+        return WAYMO_SYNONYMS if dataset == "waymo" else M3ED_SYNONYMS
+
     # ==================== Data Loading Methods ====================
     def load_annos(self, dset):
         """Load annotations of given dataset."""
@@ -107,7 +218,6 @@ class Joint3DDataset(Dataset):
             annos = annos[:128]
         return annos
 
-
     def waymo_multi_annos(self, dataset="waymo-multi"):
         def refine_frame_key(frame_key):
             frame_id, lidar_id = frame_key.split("_")[0], frame_key.split("_")[1]
@@ -117,25 +227,7 @@ class Joint3DDataset(Dataset):
         annos = []
         split = "train" if self.split == "train" else "val"
 
-        class2id_dict = {
-            "car": 0,
-            "pedestrian": 1,
-            "bus": 2,
-            "othervehicle": 3,
-            "truck": 4,
-            "cyclist": 5,
-        }
-
-        synonyms_dict = {
-            "car": ["car", "vehicle", "sedan", "van", "coupe", "automobile", "convertible", "hatchback", "SUV"],
-            "truck": ["truck", "lorry", "freight", "pickup truck", "delivery truck", "cargo truck", "semi-truck"],
-            "bus": ["bus", "coach", "minibus", "shuttle", "school bus", "public transport"],
-            "othervehicle": ["vehicle", "van", "pickup", "minivan", "jeep", "SUV", "tractor", "trailer"],
-            "pedestrian": ["pedestrian", "person", "man", "woman", "people", "child", "boy", "girl", "adult", "passerby", "walker"],
-            "cyclist": ["cyclist", "biker", "bike rider", "rider"],
-        }
-
-        data_file = os.path.join(self.data_path,  f"waymo_multi_{split}_info.pkl")
+        data_file = os.path.join(self.data_path, f"waymo_multi_{split}_info.pkl")
         print(f"Loading {data_file}")
         assert os.path.exists(data_file), f"file not exist: {data_file}"
 
@@ -144,8 +236,7 @@ class Joint3DDataset(Dataset):
 
         for frame_info in frame_infos:
             utterance = frame_info["caption"]
-            caption = " ".join(utterance.replace(",", " ,").split())
-            caption = " " + caption + " "
+            caption = self._format_caption(utterance)
             try:
                 seg_name = frame_info["segment_name"]
             except:
@@ -156,9 +247,9 @@ class Joint3DDataset(Dataset):
             frame_path = os.path.join(self.data_path, "waymo", seg_name, refine_frame_key(frame_key))
 
             # lidar path
-            lidar_path = os.path.join(frame_path, "lidar.npy")
+            lidar_path = self._get_frame_paths(frame_path, "waymo")["lidar"]
             # image path
-            image_path = os.path.join(frame_path, "image.jpg")
+            image_path = self._get_frame_paths(frame_path, "waymo")["image"]
             # bbox_3d & 2d
             box_info = defaultdict(list)
             box_id = 1
@@ -167,7 +258,7 @@ class Joint3DDataset(Dataset):
                     box_info["bbox3d"].append(np.array(frame_info[f"bbox3d_obj_{box_id}"]))
                     box_info["bbox2d"].append(np.array(frame_info[f"bbox2d_obj_{box_id}"]))
                     box_info["class_names"].append(frame_info[f"class_obj_{box_id}"].lower())
-                    box_info["class_id"].append(class2id_dict[frame_info[f"class_obj_{box_id}"].lower()])
+                    box_info["class_id"].append(CLASS_MAPPINGS[frame_info[f"class_obj_{box_id}"].lower()])
                 else:
                     break
                 box_id += 1
@@ -176,7 +267,7 @@ class Joint3DDataset(Dataset):
             unique_class_names = set(class_names)
             class_names = list(unique_class_names)
             for class_name in class_names:
-                candidate_words += synonyms_dict.get(class_name, [class_name])
+                candidate_words += WAYMO_SYNONYMS.get(class_name, [class_name])
 
             positions = []
             for word in candidate_words:
@@ -192,12 +283,10 @@ class Joint3DDataset(Dataset):
                     all_positive.append(tokens_positive)
             else:
                 # 记录哪些匹配失败
-                with open("log.txt", "a") as f:
-                    f.write(f"match failed: {utterance}\n")
-                    f.write(f"class name: {class_names}\n\n")
+                self._log_error(f"match failed: {utterance}", class_names=class_names, dataset="waymo-multi")
                 continue
             # caption
-            tokenized = self.tokenizer.batch_encode_plus([" ".join(utterance.replace(",", " ,").split())], padding="longest", return_tensors="pt")
+            tokenized = self.tokenizer.batch_encode_plus([self._format_caption(utterance)], padding="longest", return_tensors="pt")
             gt_map = get_positive_map(tokenized, all_positive)  # MARK 多目标的 positive map
             anno_dict = {
                 "scan_id": frame_key,
@@ -213,51 +302,21 @@ class Joint3DDataset(Dataset):
         print(f"Loaded {len(annos)} annotations from {split}.")
         return annos
 
-
     def load_3eed_annos(self, dataset="waymo"):
         """Load annotations of 3eed."""
 
         split = "train" if self.split == "train" else "val"
 
-        class2id_dict = {
-            "car": 0,
-            "pedestrian": 1,
-            "bus": 2,
-            "othervehicle": 3,
-            "truck": 4,
-            "cyclist": 5,
-        }
-
-        if dataset == "waymo":
-            # Define synonym mapping table for Waymo dataset
-            synonyms_dict = {
-                "car": ["car", "vehicle", "sedan", "van", "coupe", "automobile", "convertible", "hatchback", "SUV"],
-                "truck": ["truck", "lorry", "freight", "pickup truck", "delivery truck", "cargo truck", "semi-truck"],
-                "bus": ["bus", "coach", "minibus", "shuttle", "school bus", "public transport"],
-                "othervehicle": ["vehicle", "van", "pickup", "minivan", "jeep", "SUV", "tractor", "trailer"],
-                "pedestrian": ["pedestrian", "person", "man", "woman", "people", "child", "boy", "girl", "adult", "passerby", "walker"],
-                "cyclist": ["cyclist", "biker", "bike rider", "rider"],
-            }
-        else:
-            # Define synonym mapping table for other datasets
-            synonyms_dict = {
-                "car": [
-                    "car", "vehicle", "sedan", "van", "coupe", "automobile", "convertible", "hatchback", "SUV",
-                    "truck", "bus", "coach", "minibus", "shuttle", "school bus", "public transport",
-                    "lorry", "freight", "pickup truck", "delivery truck", "cargo truck", "semi-truck",
-                    "bus", "coach", "minibus", "car", "shuttle", "school bus", "public transport",
-                    "vehicle", "van", "pickup", "minivan", "jeep", "SUV", "tractor", "trailer",
-                ],
-                "pedestrian": ["pedestrian", "person", "man", "woman", "people", "child", "boy", "girl", "adult", "passerby", "walker", "cyclist", "biker", "bike rider", "rider"],
-            }
-
         # Set data path based on dataset type
         if dataset == "waymo":
-            data_path = os.path.join(self.data_path, "3eed", "waymo")
+            data_path = self._get_dataset_path("waymo")
+            synonyms_dict = WAYMO_SYNONYMS
         elif dataset == "m3ed-drone":
-            data_path = os.path.join(self.data_path, "3eed", "M3ED-Drone")
+            data_path = self._get_dataset_path("m3ed-drone")
+            synonyms_dict = M3ED_SYNONYMS
         elif dataset == "m3ed-quad":
-            data_path = os.path.join(self.data_path, "3eed", "M3ED-Quadruped")
+            data_path = self._get_dataset_path("m3ed-quad")
+            synonyms_dict = M3ED_SYNONYMS
         else:
             raise NotImplementedError
 
@@ -277,9 +336,9 @@ class Joint3DDataset(Dataset):
         class_set = set()  # Store unique classes for statistics
         for frame_name in tqdm(frames_names):
             frame_path = os.path.join(data_path, frame_name)  # e.g. waymo/scene-0000/0000_0
-            image_path = os.path.join(frame_path, "image.jpg")
-            lidar_path = os.path.join(frame_path, "lidar.npy" if dataset == "waymo" else "lidar.bin")
-            meta_path = os.path.join(frame_path, "meta_info.json")
+            image_path = self._get_frame_paths(frame_path, dataset)["image"]
+            lidar_path = self._get_frame_paths(frame_path, dataset)["lidar"]
+            meta_path = self._get_frame_paths(frame_path, dataset)["meta"]
             if not os.path.exists(meta_path):
                 continue
 
@@ -296,22 +355,15 @@ class Joint3DDataset(Dataset):
                     utterance = obj["caption"]
                 except:
                     # Log error frame information
-                    with open(f"error_frames_{dataset}.txt", "a") as log_file:
-                        log_file.write(f"{frame_name} | obj: {obj}\n\n")
+                    self._log_error(f"{frame_name} | obj: {obj}", class_names=[obj["class"].lower()], dataset=dataset)
                     continue
 
                 # Process utterance based on dataset type
-                if dataset == "waymo":
-                    utterance = utterance
-                elif dataset == "m3ed-drone":
-                    utterance = utterance.split("Summary:")[-1].strip()
-                elif dataset == "m3ed-quad":
-                    utterance = utterance.split("Summary:")[-1].strip()
+                utterance = self._process_utterance(utterance, dataset)
 
                 cat_names = obj["class"].lower()
 
-                caption = " ".join(utterance.replace(",", " ,").split())
-                caption = " " + caption + " "
+                caption = self._format_caption(utterance)
 
                 # Get current class's synonym list
                 candidate_words = synonyms_dict.get(cat_names, [cat_names])
@@ -327,19 +379,17 @@ class Joint3DDataset(Dataset):
                     matched_cls = positions[0][2]  # e.g. van
                 else:
                     # Log failed matches
-                    with open("log.txt", "a") as f:
-                        f.write(f"match failed: {utterance}\n")
-                        f.write(f"class name: {cat_names}\n\n")
+                    self._log_error(f"match failed: {utterance}", class_names=[cat_names], dataset=dataset)
                     continue
 
-                tokenized = self.tokenizer.batch_encode_plus([" ".join(utterance.replace(",", " ,").split())], padding="longest", return_tensors="pt")
+                tokenized = self.tokenizer.batch_encode_plus([self._format_caption(utterance)], padding="longest", return_tensors="pt")
                 gt_map = get_positive_map(tokenized, [tokens_positive])
 
                 bbox_3d = obj["bbox_3d"]
                 annos.append(
                     {
                         "scan_id": frame_name,
-                        "target_id": class2id_dict[obj["class"].lower()],
+                        "target_id": CLASS_MAPPINGS[obj["class"].lower()],
                         "target": obj["class"].lower(),
                         "utterance": utterance,
                         "pred_pos_map": gt_map,  # TODO: Process span using VLM
@@ -363,7 +413,7 @@ class Joint3DDataset(Dataset):
         pcd = np.fromfile(pcd_path, dtype=np.float32).reshape(-1, 4) if pcd_path.endswith(".bin") else np.load(pcd_path)
 
         N = pcd.shape[0]
-        TARGET_NUM_POINTS = 16384 
+        TARGET_NUM_POINTS = 16384
 
         if N >= TARGET_NUM_POINTS:  # Random downsampling
             indices = np.random.choice(N, TARGET_NUM_POINTS, replace=False)
@@ -406,13 +456,12 @@ class Joint3DDataset(Dataset):
         reflectance = reflectance - 0.5  # self.mean_rgb[0] # from [0, 1] to [-1, 1]
         point_cloud = np.concatenate([xyz, reflectance], axis=1)
 
-        return xyz  # point_cloud  
+        return xyz  # point_cloud
 
     def _get_token_positive_map(self, anno):
         """Return correspondence of boxes to tokens."""
         # Token start-end span in characters
-        caption = " ".join(anno["utterance"].replace(",", " ,").split())
-        caption = " " + caption + " "
+        caption = self._format_caption(anno["utterance"])
         tokens_positive = np.zeros((MAX_NUM_OBJ, 2))
         if isinstance(anno["target"], list):
             cat_names = anno["target"]
@@ -441,7 +490,7 @@ class Joint3DDataset(Dataset):
             tokens_positive[c][1] = end_span
 
         # Positive map (for soft token prediction)
-        tokenized = self.tokenizer.batch_encode_plus([" ".join(anno["utterance"].replace(",", " ,").split())], padding="longest", return_tensors="pt")
+        tokenized = self.tokenizer.batch_encode_plus([self._format_caption(anno["utterance"])], padding="longest", return_tensors="pt")
         positive_map = np.zeros((MAX_NUM_OBJ, 256))
         gt_map = get_positive_map(tokenized, tokens_positive[: len(cat_names)])
         positive_map[: len(cat_names)] = gt_map
@@ -458,10 +507,12 @@ class Joint3DDataset(Dataset):
         # Find points inside bbox and mark as 0
 
         # Generate axis_align_bbox for 3D object
-        bbox = np.array(anno["gt_bbox"])
+        bbox = np.array(anno["gt_bbox"])[None, :7]
 
-        mask = get_points_in_bbox(xyz, bbox[:3], bbox[3:6], bbox[6])
-        point_instance_label[mask] = 0
+        # mask = get_points_in_bbox(xyz, bbox[:3], bbox[3:6], bbox[6])
+        # point_instance_label[mask] = 0
+        point_indices = points_in_boxes_cpu(torch.from_numpy(xyz), torch.from_numpy(bbox)).numpy()
+        point_instance_label[point_indices[0]] = 0
 
         if anno["dataset"] == "m3ed-drone":
             bbox = bbox.reshape(-1)
@@ -469,11 +520,6 @@ class Joint3DDataset(Dataset):
             bbox = convert_boxes_from_n_to_vir(bbox, anno["pose"], drone=True)
         elif anno["dataset"] == "m3ed-quad":
             bbox = convert_boxes_from_n_to_vir(bbox, anno["pose"], drone=False)
-
-        # Generate axis_align_bbox for debug
-        if self.visualize:
-            bbox_mesh = create_axis_aligned_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb=(0, 180, 139))
-            o3d.io.write_triangle_mesh(f"{self.vis_save_dir}/{anno['scan_id']}_{anno['dataset']}_bbox.ply", bbox_mesh)
 
         bbox = bbox.reshape(-1)
         bbox = bbox[:7]
@@ -486,11 +532,14 @@ class Joint3DDataset(Dataset):
         box_label_mask = np.zeros(MAX_NUM_OBJ)
         box_label_mask[: len(tids)] = 1  # Mark which bboxes are valid
 
-        # Visualization check, points in mask are red, other points are gray, save as .ply using open3d, can be viewed with meshlab
-        # if anno["dataset"] == "3eed_debug":
-            # visualize_3eed_pointcloud_with_bbox(xyz, point_instance_label, save_path=f"vis_3eed/{anno['scan_id']}.ply")
-        return bboxes, box_label_mask, point_instance_label
+        # Generate axis_align_bbox for debug
+        if self.visualize:
+            # bbox_mesh = create_axis_aligned_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb=(0, 180, 139))
+            bbox_mesh = create_rotated_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb=(0, 180, 139))
+            o3d.io.write_triangle_mesh(f"{self.vis_save_dir}/{anno['scan_id']}_{anno['dataset']}_bbox.ply", bbox_mesh)
+            print(f"{self.vis_save_dir}/{anno['scan_id']}_{anno['dataset']}_bbox.ply")
 
+        return bboxes, box_label_mask, point_instance_label
 
     def _get_waymo_multi_target_boxes(self, anno, xyz):
         """Return gt boxes to detect."""
@@ -498,13 +547,13 @@ class Joint3DDataset(Dataset):
         tids = boxes_info["class_id"]
         gt_bbox = np.stack(boxes_info["bbox3d"], axis=0).astype(np.float32)  # shape: (N, 7)
         xyz = xyz[:, :3]
-        point_instance_label = -np.ones(len(xyz)) # 找到 bbox 之内的点，并标记为 0
+        point_instance_label = -np.ones(len(xyz))  # 找到 bbox 之内的点，并标记为 0
 
         point_indices = points_in_boxes_cpu(torch.from_numpy(xyz), torch.from_numpy(gt_bbox)).numpy()
         for i in range(gt_bbox.shape[0]):
             fg_mask = point_indices[i] > 0
             # point_instance_label[fg_mask] = i
-            point_instance_label[fg_mask] = 0  
+            point_instance_label[fg_mask] = 0
 
         bboxes = np.zeros((MAX_NUM_OBJ, 7))
         bboxes[: len(tids)] = gt_bbox[:, :7]  # shape: (N, 6)
@@ -634,7 +683,7 @@ class Joint3DDataset(Dataset):
 
         # Read annotation
         anno = self.annos[index]
-        
+
         if anno["dataset"] == "waymo-multi":
             return self.getitem_waymo_multi(index)
 
@@ -663,19 +712,19 @@ class Joint3DDataset(Dataset):
         _labels = np.zeros(MAX_NUM_OBJ)  # 132
 
         ret_dict = {
-            "box_label_mask": box_label_mask.astype(np.float32),  # NOTE Used in loss calculation 
+            "box_label_mask": box_label_mask.astype(np.float32),  # NOTE Used in loss calculation
             "center_label": gt_bboxes[:, :3].astype(np.float32),  # xyz
-            "sem_cls_label": _labels.astype(np.int64),  # NOTE Used in loss calculation 
+            "sem_cls_label": _labels.astype(np.int64),  # NOTE Used in loss calculation
             "size_gts": gt_bboxes[:, 3:6].astype(np.float32),  # NOTE w h d
-            "gt_bbox": gt_bboxes[0].astype(np.float32),
-            'meta_path': anno['meta_path'],
+            "gt_bboxes": gt_bboxes[0].astype(np.float32),
+            "meta_path": anno["meta_path"],
             "point_clouds": point_cloud.astype(np.float32),
             "utterances": (" ".join(anno["utterance"].replace(",", " ,").split()) + " . not mentioned"),
             "positive_map": positive_map.astype(np.float32),
-            "point_instance_label": point_instance_label.astype(np.int64),  # NOTE Used in loss calculation 
-            "is_view_dep": self._is_view_dep(anno["utterance"]), 
-            "is_hard": False, 
-            "is_unique": False,  
+            "point_instance_label": point_instance_label.astype(np.int64),  # NOTE Used in loss calculation
+            "is_view_dep": self._is_view_dep(anno["utterance"]),
+            "is_hard": False,
+            "is_unique": False,
         }
 
         return ret_dict
@@ -683,8 +732,8 @@ class Joint3DDataset(Dataset):
     def getitem_waymo_multi(self, index):
         anno = self.annos[index]
         self.random_utt = False
-        anno["pcd_path"] = anno["pcd_path"].replace('data/', 'data/3eed/')
-        anno["image_path"] = anno["image_path"].replace('data/', 'data/3eed/')
+        anno["pcd_path"] = anno["pcd_path"].replace("data/", "data/3eed/")
+        anno["image_path"] = anno["image_path"].replace("data/", "data/3eed/")
         point_cloud = self._get_3eed_pcd(anno)
         gt_bboxes, box_label_mask, point_instance_label = self._get_waymo_multi_target_boxes(anno, point_cloud)
         positive_map = np.zeros((MAX_NUM_OBJ, 256))  #  1, 256
@@ -692,10 +741,10 @@ class Joint3DDataset(Dataset):
         positive_map[: len(positive_map_)] = positive_map_
         _labels = np.zeros(MAX_NUM_OBJ)  # 132
         ret_dict = {
-            "box_label_mask": box_label_mask.astype(np.float32), 
-            "center_label": gt_bboxes[:, :3].astype(np.float32), 
-            "sem_cls_label": _labels,  # NOTE 计算 loss 的时候用到 
-            "size_gts": gt_bboxes[:, 3:6].astype(np.float32),  
+            "box_label_mask": box_label_mask.astype(np.float32),
+            "center_label": gt_bboxes[:, :3].astype(np.float32),
+            "sem_cls_label": _labels,  # NOTE 计算 loss 的时候用到
+            "size_gts": gt_bboxes[:, 3:6].astype(np.float32),
             "gt_bboxes": gt_bboxes.astype(np.float32),
             "class_ids": ",".join(map(str, anno["boxes_info"]["class_id"])),  # e.g., "1,3,5"
             "utterance": anno["utterance"],
@@ -703,13 +752,14 @@ class Joint3DDataset(Dataset):
             "point_clouds": point_cloud.astype(np.float32),
             "utterances": (" ".join(anno["utterance"].replace(",", " ,").split()) + " . not mentioned"),
             "positive_map": positive_map.astype(np.float32),
-            "point_instance_label": point_instance_label.astype(np.int64),  
-            "is_view_dep": self._is_view_dep(anno["utterance"]), 
-            "is_hard":  False,  
-            "is_unique":False
+            "point_instance_label": point_instance_label.astype(np.int64),
+            "is_view_dep": self._is_view_dep(anno["utterance"]),
+            "is_hard": False,
+            "is_unique": False,
         }
 
         return ret_dict
+
     def __len__(self):
         """Return number of utterances."""
         return len(self.annos)
@@ -720,6 +770,7 @@ class Joint3DDataset(Dataset):
         rels = ["front", "behind", "back", "left", "right", "facing", "leftmost", "rightmost", "looking", "across"]
         words = set(utterance.split())
         return any(rel in words for rel in rels)
+
 
 # ==================== Utility Functions ====================
 def get_positive_map(tokenized, tokens_positive):
@@ -752,20 +803,24 @@ def get_positive_map(tokenized, tokens_positive):
     positive_map = positive_map / (positive_map.sum(-1)[:, None] + 1e-12)
     return positive_map.numpy()
 
+
 def rot_x(pc, theta):
     """Rotate along x-axis."""
     theta = theta * np.pi / 180
     return np.matmul(np.array([[1.0, 0, 0], [0, np.cos(theta), -np.sin(theta)], [0, np.sin(theta), np.cos(theta)]]), pc.T).T
+
 
 def rot_y(pc, theta):
     """Rotate along y-axis."""
     theta = theta * np.pi / 180
     return np.matmul(np.array([[np.cos(theta), 0, np.sin(theta)], [0, 1.0, 0], [-np.sin(theta), 0, np.cos(theta)]]), pc.T).T
 
+
 def rot_z(pc, theta):
     """Rotate along z-axis."""
     theta = theta * np.pi / 180
     return np.matmul(np.array([[np.cos(theta), -np.sin(theta), 0], [np.sin(theta), np.cos(theta), 0], [0, 0, 1.0]]), pc.T).T
+
 
 def box2points(box):
     """Convert box center/hwd coordinates to vertices (8x3)."""

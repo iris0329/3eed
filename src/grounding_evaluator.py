@@ -96,6 +96,9 @@ class GroundingEvaluator:
             for key in all_dets[0].keys():
                 merged_predictions[key] = 0
                 for p in all_dets:
+                    # 确保所有值都在 CPU 上
+                    if isinstance(p[key], torch.Tensor):
+                        p[key] = p[key].cpu()
                     merged_predictions[key] += p[key]
             self.dets = merged_predictions
 
@@ -103,6 +106,9 @@ class GroundingEvaluator:
             for key in all_gts[0].keys():
                 merged_predictions[key] = 0
                 for p in all_gts:
+                    # 确保所有值都在 CPU 上
+                    if isinstance(p[key], torch.Tensor):
+                        p[key] = p[key].cpu()
                     merged_predictions[key] += p[key]
             self.gts = merged_predictions
 

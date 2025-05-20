@@ -79,17 +79,25 @@ def compute_distance_colors(points):
     return colors
 
 
-def create_axis_aligned_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb=(0, 180, 139)):
-
+def create_rotated_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb=(0, 180, 139)):
+    """
+    Create a rotated bounding box with cylindrical edges.
+    
+    Args:
+        bbox: numpy array of length 7, containing [x, y, z, width, height, depth, rotation_z]
+              where rotation_z is the rotation angle around z-axis in radians
+        radius: radius of the cylindrical edges
+        color_rgb: RGB color tuple for the bbox
+    """
     if bbox.shape[0] == 1 and len(bbox.shape) == 2:
         bbox = bbox.reshape(-1)
 
-    assert len(bbox.shape) == 1, "bbox should be a 1D array of length 6"
+    assert len(bbox.shape) == 1, "bbox should be a 1D array"
+    assert len(bbox) >= 7, "bbox should have at least 7 elements [x,y,z,w,h,d,rot_z]"
 
-    if len(bbox) > 6:
-        bbox = bbox[:6]
     center = bbox[:3]
-    size = bbox[3:]
+    size = bbox[3:6]
+    rotation_z = bbox[6]  # rotation around z-axis in radians
 
     w, h, d = size
     half = np.array([w, h, d]) / 2
@@ -107,7 +115,21 @@ def create_axis_aligned_bbox_with_cylindrical_edges(bbox, radius=0.02, color_rgb
             [-1, 1, 1],
         ]
     )
-    vertices = signs * half + center
+    vertices = signs * half
+
+    # 创建绕z轴旋转的旋转矩阵
+    cos_rot = np.cos(rotation_z)
+    sin_rot = np.sin(rotation_z)
+    rot_matrix = np.array([
+        [cos_rot, -sin_rot, 0],
+        [sin_rot, cos_rot, 0],
+        [0, 0, 1]
+    ])
+
+    # 应用旋转
+    vertices = np.dot(vertices, rot_matrix.T)
+    # 平移到中心点
+    vertices = vertices + center
 
     # 12 条边连接索引
     edges = [
