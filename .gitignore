@@ -175,3 +175,4 @@ data/roberta_base/
 data/refer_it_3d/
 *.ply
 error_frames_m3ed-*.txt
+visualization/

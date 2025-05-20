@@ -47,13 +47,15 @@
                 "--dataset",
                 // "nr3d",
                 // "3eed",
+                "m3ed-drone",
                 // "m3ed-quad",
-                "waymo-multi",
+                // "waymo-multi",
                 "--test_dataset",
                 // "nr3d",
                 // "3eed",
+                "m3ed-drone",
                 // "m3ed-quad",
-                "waymo-multi",
+                // "waymo-multi",
                 "--detect_intermediate",
                 "--use_soft_token_loss",
                 "--use_contrastive_align",
@@ -67,7 +69,7 @@
                 "--debug"
             ],
             "env": {
-                "CUDA_VISIBLE_DEVICES": "3"
+                "CUDA_VISIBLE_DEVICES": "1"
             }
         }
         // {

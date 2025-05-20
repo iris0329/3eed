@@ -1,4 +1,4 @@
-TORCH_DISTRIBUTED_DEBUG=INFO CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node 1 --master_port $RANDOM \
+TORCH_DISTRIBUTED_DEBUG=INFO CUDA_VISIBLE_DEVICES=1 python -m torch.distributed.launch --nproc_per_node 1 --master_port $RANDOM \
     train_dist_mod.py --num_decoder_layers 6 \
     --use_color \
     --weight_decay 0.0005 \
@@ -10,5 +10,5 @@ TORCH_DISTRIBUTED_DEBUG=INFO CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.
     --detect_intermediate --joint_det \
     --lr_decay_epochs 25 26 \
     --use_soft_token_loss --use_contrastive_align \
-    --log_dir ./logs/ours \
-    --self_attend --augment_det \
+    --log_dir ./logs/ours_aba \
+    --self_attend --augment_det --flag wo_cpa_vis

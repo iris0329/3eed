@@ -184,3 +184,8 @@ scripts/train_multi_3eed.sh
 scripts/val_multi_3eed.sh
 ```
 Make sure to set the correct path for `--checkpoint_path` in the script.
+
+
+# TODO
+
+- [ ] Add rotation in prediction 
