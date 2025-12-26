@@ -881,10 +881,10 @@ def iou3d_rotated_vs_aligned(gt_bboxes_rotated, pred_bboxes_aligned):
                     gt_corners_reorder[i].cpu().numpy(), 
                     pred_corners_reorder[j].cpu().numpy()
                 )
-                ious[i, j] = iou3d
+                ious[i, j] = torch.tensor(iou3d).to(gt_corners.device)
             except:
                 # If computation fails, set to 0
-                ious[i, j] = 0.0
+                ious[i, j] = torch.tensor(0.0).to(gt_corners.device)
     
     # union can be approximated (for exact value, modify box3d_iou return)
     union = None
